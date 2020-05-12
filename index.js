@@ -28,7 +28,9 @@ db.on('close', () => { console.log("database disconnected") });
 var townSchema = mongoose.Schema({
   name: String, 
   town_id: Number,
-  province_id: Number   
+  province_id: Number,
+  updated: { type: Date, default: Date.now },
+  map_url: String
 }); 
 var townModel = mongoose.model('Town', townSchema);
 
@@ -40,86 +42,91 @@ var provinceSchema = mongoose.Schema({
 var provinceModel = mongoose.model('Province', provinceSchema);
 
 
-
-// Get all Provinces
-let url = 'http://www.kraland.org/map.php';
-
-client.get(url)
-  .then( response => {
-    // Parser les informations
-    console.log(response.status);
-    console.log(response.config.url);
-
-    /*
-    let html = parse(response.data)
-    console.log(html.structure);
-    */
-    let provinces = []
-    let payload = cheerio.load(response.data);
-    payload('area').each( (i,e)=> {
-      provinces[i] = e.attribs;
-    });
-
-    console.log(provinces[0]);
-
-
-    provinces.forEach( (value, index) => {
-      let p_name = value.title;
-      let p_id = parseInt(value.href.substring(12));
-      console.log(p_name, ":", p_id);
-      var province = new provinceModel({name: p_name, province_id: p_id});
-      province.save( (error) => console.log(error) )
-      province = null;
-    });
-
-    /*
-    var province = new provinceModel({name: pName, province_id: pId});
-    province.save();
-    province = null;
-    */
-    db.close();
-  })
-  .catch(error => {
-    console.log(error);
+async function getProvinces(url) {
+  console.log("inside getProvinces:", url);
+  let respPromise = client.get(url);
+  console.log("Waiting for promise");
+  let resp = await respPromise;
+  console.log(resp.config.url + ':', resp.status);
+  
+  // Get our province list
+  let provinces = []
+  let payload = cheerio.load(resp.data);
+  payload('area').each( (i,e)=> {
+    provinces[i] = e.attribs;
   });
+  // console.log(provinces[0]);
 
-/*
-client.get('http://kraland.org/map.php?p=1_30_81')
-  .then(response => {
-    console.log(response.status);
-    console.log(response.config.url);
-    // console.log(response.data);
+  // Parse the list and insertOrUpdate the data in DB
+  await Promise.all( provinces.map( async (provinceData) => {
+    let p_name = provinceData.title;
+    let p_id = parseInt(provinceData.href.substring(12));
+    // console.log(p_name, ":", p_id);
+    await provinceModel.findOneAndUpdate(
+      { "province_id": p_id}, 
+      {"updated": Date.now(), "name": p_name}, 
+      { new: true, upsert: true}
+    );
 
-    const html = parse(response.data);
+    // Town list update
+    // TODO: make check if needs updates...
+    if( true ) {
+      console.log('updating ' + p_name + '...');
+      let towns = [];
+      // Do something...
+      let url = 'http://kraland.org/map.php?p=1_'+p_id;
+      let respPromise = client.get(url);
+      let resp = await respPromise;
+      console.log(resp.config.url + ':', resp.status);
+      let payload = cheerio.load(resp.data);
+      // console.log(payload('script')[1].children[0].data);
+      let shouldAdd = true;
+      payload('select[name=city] option').each( (i,e) => {
+        // console.log(e);
+        // console.log(shouldAdd);
+        if( e.attribs.value === '0' ) {
+          // We got a dummy option
+          // console.log("dummy option");
+          // console.log(e.children[0].data)
+          if( String(e.children[0].data).startsWith('--') ) {
+            // this should be the delimiter we are looking for
+            // console.log("delimiter ?");
+            shouldAdd = false;
+          }
+          return;
+        }
 
-    console.log(html.structure);
-  })
-  .catch(error => {
-    console.log(error);
-  });
-*/
-
-
- 
-
-/* TODO: clean
-var db = mongoose.connection; 
-db.on('error', console.error.bind(console, 'Erreur lors de la connexion')); 
-db.once('open', function (){
-    console.log("Connexion à la base OK");
-
-     
-    var townModel = mongoose.model('Town', townSchema);
-    var bottine = new townModel({ nom: "Bottine", town_id: 81, province_id: 30});
-    bottine.save(function (err) {
-        if (err) return console.error(err);
+        if( shouldAdd ) {
+          // console.log(e.attribs.value);
+          // console.log(e.children[0].data);
+          let t_name = e.children[0].data;
+          let t_id = String(e.attribs.value).split('_')[1];
+          let p_id = String(e.attribs.value).split('_')[0];
+          console.log(t_name + ':', t_id);
+          console.log(e.attribs);
+          towns.push({name: t_name, t_id: t_id, p_id: p_id});
+        }
       });
-    // Déconnexion
-    // db.close();
-}); 
-*/
-/* TODO: clean
-const root = parse('<ul id="list"><li>Hello World</li></ul>');
- 
-console.log(root.firstChild.structure);
-*/
+
+      await Promise.all( towns.map( async (e,i) => {
+        let t_name = e.name;
+        let t_id = e.t_id;
+        let p_id = e.p_id;
+        await townModel.findOneAndUpdate(
+          {town_id: t_id},
+          {province_id: p_id, "updated": Date.now(), "name": t_name, map_url: 'http://kraland.org/map?p=1_'+p_id+'_'+t_id},
+          {new: true, upsert: true}
+        );
+      }));
+    }
+  }));
+}
+
+// Main function
+(async function(){
+  // Get all Provinces
+  let url = 'http://www.kraland.org/map.php';
+  await getProvinces(url);
+  console.log("toto");
+  db.close();
+})();
